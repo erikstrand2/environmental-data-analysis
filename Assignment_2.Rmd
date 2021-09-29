@@ -1,0 +1,216 @@
+---
+title: "Assignment 2"
+author: "Erik Strand"
+date: "9.26.2021"
+output: 
+  html_document:
+    toc: true
+---
+```{r}
+knitr::opts_chunk$set(
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r import libraries}
+library(tidyverse)
+library(repurrrsive)
+library(sf)
+library(wesanderson)
+library(leaflet)
+library(tmap)
+```
+
+# Question 1
+
+```{r}
+wesSelectPals <- 
+  wes_palettes %>% 
+  map_dbl(length) %>% 
+  keep(. > 4) %>% 
+  names()
+
+print(wesSelectPals)
+```
+
+# Question 2
+
+```{r, results=FALSE}
+trade_balance <- read_csv("data/trade_balance.csv")
+top_five_countries_names <- 
+    trade_balance %>% 
+    group_by(country) %>% 
+    summarize(balance = mean(balance)) %>% 
+    slice_max(balance, n = 5) %>%
+    pull(country)
+
+plotWes <- function(palette, df, top_five){
+    data <- 
+      df %>% 
+      filter(country %in% top_five)
+  
+    ggplot(data = data, aes(x = year, y = balance, color = country)) + 
+        geom_line() + 
+        scale_color_manual(values = wes_palette(palette)) + 
+        scale_y_continuous(labels = scales::label_comma()) + 
+        labs(
+            x = "", 
+            y = "Import/Export Balance (Million USD)", 
+            title = "Top 5 Countries by Net Import, 1995-2019", 
+            subtitle = paste("Wes Anderson Palette", palette),
+            color = ""
+        ) + 
+        theme_light()
+}
+
+map(wesSelectPals, ~ plotWes(., trade_balance, top_five_countries_names))
+```
+
+# Question 3
+
+```{r}
+counties <- read_sf("data/cb_2018_us_county_20m") %>% 
+    mutate(
+        fips = paste0(STATEFP, COUNTYFP), 
+        areaCalc = st_area(.) %>% units::set_units("us_survey_mile^2")
+    )
+
+acs_names <- read_csv("data/ACS2018Counties.csv", n_max = 1) %>% names()
+acs <- 
+    read_csv(
+      "data/ACS2018Counties.csv", 
+      skip = 2, 
+      col_names = acs_names 
+    ) %>% 
+    janitor::clean_names()
+    
+counties_acs <- 
+    counties %>% 
+    left_join(acs, by = "fips") %>% 
+    st_transform(
+        crs = "+proj=aea +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-96 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+    ) %>% 
+    mutate(
+        popDens = as.numeric(total_population) / areaCalc
+    ) %>% 
+    select(
+        fips, 
+        name = qualifying_name, 
+        areaCalc, 
+        total_population, 
+        popDens, 
+        geometry
+    )
+
+head(counties_acs)
+```
+
+# Question 4
+
+```{r}
+quantile <- colorQuantile("OrRd", counties_acs$popDens, n = 5)
+
+leaflet() %>% 
+    addProviderTiles(provider = "OpenStreetMap.Mapnik") %>% 
+    addPolygons(
+        data = counties_acs %>% st_transform(crs = 4326), 
+        weight = 1, 
+        color = ~quantile(popDens), 
+        fillOpacity = 1 
+    ) %>% 
+    setView(lng = -120, lat = 52, zoom = 2.7)
+```
+
+
+# Question 5
+
+```{r}
+ca_air_quality <- 
+    read_csv("data/ad_viz_plotval_data.csv") %>% 
+    janitor::clean_names() %>% 
+    mutate(
+        statefp = "06", 
+        fips = paste0(statefp, county_code)
+    ) %>% 
+    group_by(fips, county) %>% 
+    summarize(maxpm25 = max(daily_mean_pm2_5_concentration))
+
+counties_ca <- 
+    counties_acs %>% 
+    inner_join(ca_air_quality, by = "fips")
+
+counties_ca_centroid <- 
+    counties_ca %>% 
+    st_centroid()
+```
+
+
+# Question 6
+
+```{r}
+counties_ca_sp <- as(counties_ca, "Spatial")
+
+# REDO BY DROPPING N TO REDUCE RESOLUTION
+# SET GRID
+ca_grid <- 
+    st_make_grid(counties_ca, n = 50) %>% 
+    st_transform(crs = st_crs(counties_ca))
+
+# I had to stop the assignment at this point - the IDW operation ran for over 3
+# hours and did not complete. 
+idw <- gstat::idw(
+    formula = maxpm25 ~ 1,
+    counties_ca_sp,
+    newdata = ca_grid,
+    idp = 2
+)
+
+idw <- 
+  idw %>% 
+  st_transform(crs = st_crs(ca_grid))
+
+aqRaster <- stars::st_rasterize(idw["var1.pred"])
+
+tmap_mode("plot")
+
+tm_shape(aqRaster) + 
+  tm_raster(title = "Max Daily PM2.5") + 
+  tm_layout(legend.position = c("right", "top"), frame = FALSE) + 
+  tm_shape(counties_ca) + 
+  tm_borders() + 
+  tm_shape(counties_ca_centroid) + 
+  tm_dots()
+```
+
+# Question 7 
+
+```{r}
+aqRaster_sf <- 
+  aqRaster %>% 
+  st_as_sf() %>% 
+  st_transform(crs = st_crs(ca_grid))
+
+counties_ca_aq <- 
+  counties_ca %>% 
+  st_intersection(aqRaster_sf) %>% 
+  group_by(fips) %>% 
+  mutate(
+    area = as.numeric(areaCalc),
+    weight = area / sum(area)
+  ) %>% 
+  summarize(avg_aq = sum(weight * var1.pred))
+
+ggplot() + 
+  geom_sf(data = counties_ca_aq %>% st_transform(crs = 4326), aes(fill = avg_aq)) + 
+  labs(
+    title = "California Air Quality by County", 
+    subtitle = "Average Daily Concentration of PM2.5 particles",
+    fill = "Avg. daily PM2.5"
+  ) + 
+  scale_fill_gradient(low = "lightyellow", high = "darkred") + 
+  theme_void()
+```
+
+
