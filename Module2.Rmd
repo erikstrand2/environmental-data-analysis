@@ -1,0 +1,285 @@
+---
+title: "Module 2"
+author: "Erik Strand"
+date: "10.24.2021"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r knit options}
+knitr::opts_chunk$set(
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE, 
+  cache = TRUE
+)
+```
+
+```{r import libraries}
+library(tidyverse)
+library(janitor)
+library(readxl)
+```
+
+```{r read in files}
+country_codes <- 
+    read_csv("../data/Country_codes/Country_codes_2020.csv", na = c("#N/A", "")) %>% 
+    clean_names() %>% 
+    select(un_country, world_bank_country, iea_country, iso3) 
+
+tpes <- read_xlsx("../Data/Energy/TPES_by_source.xlsx",
+                  sheet = "Total", skip = 5) %>% 
+    clean_names() %>% 
+    slice(-1) %>% 
+    select(-x2) %>% 
+    mutate_at(vars(-time),as.numeric) %>% 
+    rename(country = time) %>% 
+    left_join(country_codes, by = c("country"= "iea_country"))
+
+coal <- read_xlsx("../Data/Energy/TPES_by_source.xlsx", 
+                  sheet="Coal", skip = 5) %>% 
+    clean_names() %>% 
+    slice(-1) %>% 
+    select(-x2) %>% 
+    mutate_at(vars(-time),as.numeric) %>% 
+    rename(country = time) %>% 
+    mutate_at(vars(-country), function(x) x * 25.4 * 3.67) %>% 
+    pivot_longer(-country, names_to = "year", values_to = "coal") %>% 
+    mutate(year = stringr::str_remove(year, "x"),
+           year = as.numeric(year))
+
+natural_gas <- read_xlsx("../Data/Energy/TPES_by_source.xlsx", 
+                  sheet="Natural_gas", skip = 5) %>% 
+    clean_names() %>% 
+    slice(-1) %>% 
+    select(-x2) %>% 
+    mutate_at(vars(-time),as.numeric) %>% 
+    rename(country = time) %>% 
+    mutate_at(vars(-country), function(x) x * 14.1 * 3.67) %>% 
+    pivot_longer(-country, names_to = "year", values_to = "natural_gas") %>% 
+    mutate(year = stringr::str_remove(year, "x"),
+           year = as.numeric(year))
+
+crude_oil <- read_xlsx("../Data/Energy/TPES_by_source.xlsx", 
+                  sheet="Crude", skip = 5) %>% 
+    clean_names() %>% 
+    slice(-1) %>% 
+    select(-x2) %>% 
+    mutate_at(vars(-time),as.numeric) %>% 
+    rename(country = time) %>% 
+    mutate_at(vars(-country), function(x) x * 19.9 * 3.67) %>% 
+    pivot_longer(-country, names_to = "year", values_to = "crude_oil") %>% 
+    mutate(year = stringr::str_remove(year, "x"),
+           year = as.numeric(year))
+
+tfc <- read_xlsx("../Data/Energy/TFC_by_sector.xlsx",
+                 sheet = "Total_final_Consumption", skip = 5) %>%
+    clean_names() %>% 
+    slice(-1) %>% 
+    select(-x2) %>% 
+    mutate_at(vars(-time),as.numeric) %>% 
+    rename_at(vars(starts_with("x")), ~ str_sub(., 2, length(.))) %>% 
+    rename(country = time)
+
+co2 <- read_csv("../Data/CO2/INT-Export-07-09-2020_16-39-18.csv",
+                skip = 1) %>% 
+    clean_names() %>% 
+    slice(-1) %>% 
+    filter(stringr::str_detect(api, "INTL.4008-8-*")) %>% 
+    select(-api) %>%
+    mutate_at(vars(-x2), as.numeric) %>% 
+    rename(country = x2) %>% 
+    rename_at(vars(starts_with("x")), ~ str_sub(., 2, length(.))) %>%
+    left_join(country_codes, by = c("country" = "world_bank_country"))
+
+pop <- 
+    read_xlsx(
+        "../Data/Population/WPP2017_POP_F01_1_TOTAL_POPULATION_BOTH_SEXES.xlsx",
+        skip = 16
+    ) %>% 
+    clean_names() %>% 
+    select(-c(country_code, index, variant, notes)) %>% 
+    rename(country = region_subregion_country_or_area) %>% 
+    rename_at(vars(starts_with("x")), ~ str_sub(., 2, length(.))) %>%
+    left_join(country_codes, by = c("country" ="un_country"))
+
+gdp <- 
+    read_csv(
+        "../Data/GDP/API_NY.GDP.MKTP.PP.CD_DS2_en_csv_v2_1220990.csv",
+        skip = 3
+    ) %>% 
+    clean_names() %>% 
+    select(-c(country_code, indicator_name, indicator_code, x65)) %>% 
+    mutate_at(vars(-country_name), as.numeric) %>% 
+    rename(country = country_name) %>% 
+    rename_at(vars(starts_with("x")), ~ str_sub(., 2, length(.))) %>%
+    left_join(country_codes, by = c("country" = "world_bank_country"))
+```
+
+```{r}
+co2_calc <- 
+    coal %>% 
+    left_join(natural_gas, by = c("country", "year")) %>% 
+    left_join(crude_oil, by = c("country", "year")) %>% 
+    mutate(
+        f_coal = (coal) / 1000000,
+        f_gas = (natural_gas) / 1000000,
+        f_oil = (crude_oil) / 1000000
+    ) %>% 
+    left_join(country_codes, by = c("country" = "iea_country"))
+
+tpes_long <- 
+    tpes %>% 
+    select(-c(un_country, world_bank_country, country)) %>% 
+    pivot_longer(-iso3, names_to = "year", values_to = "e") %>% 
+    mutate(year = stringr::str_remove(year, "x"),
+           year = as.numeric(year)) %>% 
+    filter(!is.na(iso3)) %>% 
+    mutate(e = as.numeric(e))
+
+co2_long <- 
+    co2 %>% 
+    select(-c(un_country, iea_country, country)) %>% 
+    pivot_longer(-c( iso3),names_to = "year", values_to = "f_tot") %>% 
+    mutate(year= stringr::str_remove(year, "x"),
+           year = as.numeric(year))%>% 
+    filter(!is.na(iso3))
+
+gdp_long <- 
+    gdp %>% 
+    select(-c(un_country, iea_country, country)) %>% 
+    pivot_longer(-c( iso3), names_to = "year", values_to = "g") %>% 
+    mutate(year= stringr::str_remove(year, "x"),
+           year = as.numeric(year))%>% 
+    filter(!is.na(iso3))
+
+pop_long <- 
+    pop  %>% 
+    select(-c(world_bank_country, iea_country, country)) %>% 
+    pivot_longer(-c( iso3), names_to = "year", values_to = "p") %>% 
+    mutate(year= stringr::str_remove(year, "x"),
+           year = as.numeric(year))%>% 
+    filter(!is.na(iso3))
+
+combined <- 
+    tpes_long %>% 
+    left_join(co2_calc %>% select(iso3, year, starts_with("f")),
+               by = c("year" = "year", "iso3" = "iso3")) %>% 
+    left_join(gdp_long,
+               by = c("year" = "year", "iso3" = "iso3")) %>% 
+    left_join(pop_long,
+               by = c("year" = "year", "iso3" = "iso3")) %>% 
+    left_join(co2_long %>% filter(!is.na(iso3)))
+
+complete <- 
+    combined %>% 
+    filter(complete.cases(.))
+```
+
+
+```{r kaya regression}
+kaya_formula <- f_tot ~ p + g_p + e_g + f_e
+
+kaya_nest <- 
+    combined %>% 
+    filter(iso3 != "TGO") %>% 
+    mutate(g_p = g/p,
+           e_g = e/g,
+           f_e = f_tot/e) %>% 
+    select(-c(e, f_coal, f_gas, f_oil, g)) %>% 
+    filter(complete.cases(.)) %>% 
+    group_by(iso3) %>% 
+    nest() %>% 
+    ungroup()
+
+kaya_coefs <- function(iso3, df){
+    kaya_formula <- f_tot ~ p + g_p + e_g + f_e
+    kaya <- 
+        df %>% 
+        mutate_at(vars(-c(year, f_tot)), scale) %>% 
+        filter(complete.cases(.))
+    mod <- lm(formula = kaya_formula, data = kaya)
+    coefs <- 
+        tibble::enframe(mod$coefficients) %>% 
+        mutate(iso3 = iso3)
+    return(coefs)
+}
+    
+results <- 
+    map2_dfr(
+        kaya_nest$iso3, 
+        kaya_nest$data,
+        kaya_coefs
+    ) %>% 
+    pivot_wider(names_from = name, values_from = value) %>% 
+    left_join(
+        pop %>% 
+            select(iso3, pop = `2015`) %>% 
+            filter(!is.na(iso3)), 
+        by = "iso3"
+    )
+
+knitr::kable(results)
+```
+
+
+```{r}
+results %>% 
+    filter(!(iso3 == "WLD")) %>% 
+    ggplot(aes(x = g_p, y = e_g, size = pop / 1000)) + 
+    geom_point(alpha = 0.7) + 
+    theme_minimal() + 
+    scale_size_continuous(
+        breaks = c(10, 100, 500, 1000),
+        labels = scales::label_comma()
+    ) +
+    labs(
+        title = "Kaya Identity Coefficients by Country", 
+        x = "GDP per Capita", 
+        y = "Energy Intensity of GDP", 
+        size = "2015 Population\n(Millions)", 
+        caption = "Data Sources:\nUnited Nations, IEA,\nOECD, World Bank"
+    )
+
+results %>% 
+    filter(!(iso3 == "WLD")) %>% 
+    ggplot(aes(x = e_g, y = f_e, size = pop / 1000)) + 
+    geom_point(alpha = 0.7) + 
+    theme_minimal() + 
+    scale_size_continuous(
+        breaks = c(10, 100, 500, 1000),
+        labels = scales::label_comma()
+    ) +
+    labs(
+        title = "Kaya Identity Coefficients by Country", 
+        x = "Energy Intensity of GDP", 
+        y = "Carbon Footprint of Energy Consumption", 
+        size = "2015 Population\n(Millions)", 
+        caption = "Data Sources:\nUnited Nations, IEA,\nOECD, World Bank"
+    )
+
+results %>% 
+    filter(!(iso3 == "WLD")) %>% 
+    ggplot(aes(x = f_e, y = g_p, size = pop / 1000)) + 
+    geom_point(alpha = 0.7) + 
+    theme_minimal() + 
+    scale_size_continuous(
+        breaks = c(10, 100, 500, 1000),
+        labels = scales::label_comma()
+    ) +
+    labs(
+        title = "Kaya Identity Coefficients by Country", 
+        x = "Carbon Footprint of Energy Consumption", 
+        y = "GDP Per Capita", 
+        size = "2015 Population\n(Millions)", 
+        caption = "Data Sources:\nUnited Nations, IEA,\nOECD, World Bank"
+    )
+```
+
+Based on this Kaya Identity analysis, we can see that the coefficients of all three principal inputs (GDP per Capita, Energy Intensity of the GDP, Carbon Footprint of Energy Consumption) are positive, indicating that each input has a generally positive relationship with the given country's Kaya identity value. In other words, increases in each individual component are also correlated with an increase in the Kaya identity. This is intuitive given the multiplicative nature of the Kaya identity formula. 
+
+In general, there tends to be a positive linear relationship between any two of these Kaya identity coefficients. For example, as the influence of a country's GDP per capita on its carbon emissions increases, so too does the influence of the energy intensity of the GDP. This is also an intuitive conclusion, although it does reveal the important fact that none of the Kaya identity inputs offset increases in the others - all of the inputs contribute to an increase in total carbon emissions. 
+
+However, the linear relationship between coefficient pairs are not created equal. For example, the energy intensity of the GDP increases rapidly in relation to the GDP per capita, but more slowly in relation to the carbon footprint of energy consumption. Likewise, the influence of the GDP per capita on carbon output increases somewhat slower than the influence of the carbon footprint of energy consumption. These unequal relationships tell us that interventions in certain areas may be more effective at lowering carbon emissions.
+
